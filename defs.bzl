@@ -35,6 +35,7 @@ def codex_rust_crate(
         integration_compile_data_extra = [],
         test_data_extra = [],
         test_tags = [],
+        extra_binaries = [],
         visibility = ["//visibility:public"]):
     deps = all_crate_deps(normal = True) + deps_extra
     dev_deps = all_crate_deps(normal_dev = True) + dev_deps_extra
@@ -66,7 +67,7 @@ def codex_rust_crate(
             compile_data = compile_data,
             srcs = lib_srcs,
             edition = crate_edition,
-            visibility = visibility,
+            visibility = ["//visibility:public"],
         )
 
         rust_test(
@@ -98,7 +99,13 @@ def codex_rust_crate(
             proc_macro_deps = proc_macro_deps,
             edition = crate_edition,
             srcs = native.glob(["src/**/*.rs"]),
+            visibility = ["//visibility:public"],
         )
+
+    for binary_label in extra_binaries:
+        sanitized_binaries.append(binary_label)
+        binary = Label(binary_label).name
+        cargo_env["CARGO_BIN_EXE_" + binary] = "$(rootpath %s)" % binary_label
 
     for test in native.glob(["tests/*.rs"], allow_empty = True):
         test_name = name + "-" + test.removeprefix("tests/").removesuffix(".rs").replace("/", "-")
