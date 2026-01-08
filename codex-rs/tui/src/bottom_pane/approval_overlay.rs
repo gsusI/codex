@@ -16,6 +16,8 @@ use crate::key_hint::KeyBinding;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
+use codex_common::approval_presets::builtin_approval_presets;
+use codex_common::approval_presets::ApprovalPreset;
 use codex_core::features::Feature;
 use codex_core::features::Features;
 use codex_core::protocol::ElicitationAction;
@@ -171,6 +173,13 @@ impl ApprovalOverlay {
                 (ApprovalVariant::Exec { id, command, .. }, ApprovalDecision::Review(decision)) => {
                     self.handle_exec_decision(id, command, decision.clone());
                 }
+                (
+                    ApprovalVariant::Exec { id, command, .. },
+                    ApprovalDecision::ReviewWithPreset { decision, preset },
+                ) => {
+                    self.apply_approval_preset(preset.clone());
+                    self.handle_exec_decision(id, command, decision.clone());
+                }
                 (ApprovalVariant::ApplyPatch { id, .. }, ApprovalDecision::Review(decision)) => {
                     self.handle_patch_decision(id, decision.clone());
                 }
@@ -219,6 +228,21 @@ impl ApprovalOverlay {
                 request_id: request_id.clone(),
                 decision,
             }));
+    }
+
+    fn apply_approval_preset(&self, preset: ApprovalPreset) {
+        self.app_event_tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
+            cwd: None,
+            approval_policy: Some(preset.approval),
+            sandbox_policy: Some(preset.sandbox.clone()),
+            model: None,
+            effort: None,
+            summary: None,
+        }));
+        self.app_event_tx
+            .send(AppEvent::UpdateAskForApprovalPolicy(preset.approval));
+        self.app_event_tx
+            .send(AppEvent::UpdateSandboxPolicy(preset.sandbox));
     }
 
     fn advance_queue(&mut self) {
@@ -428,6 +452,10 @@ enum ApprovalVariant {
 #[derive(Clone)]
 enum ApprovalDecision {
     Review(ReviewDecision),
+    ReviewWithPreset {
+        decision: ReviewDecision,
+        preset: ApprovalPreset,
+    },
     McpElicitation(ElicitationAction),
 }
 
@@ -451,43 +479,75 @@ fn exec_options(
     proposed_execpolicy_amendment: Option<ExecPolicyAmendment>,
     features: &Features,
 ) -> Vec<ApprovalOption> {
-    vec![ApprovalOption {
+    let mut options = vec![ApprovalOption {
         label: "Yes, proceed".to_string(),
         decision: ApprovalDecision::Review(ReviewDecision::Approved),
         display_shortcut: None,
         additional_shortcuts: vec![key_hint::plain(KeyCode::Char('y'))],
-    }]
-    .into_iter()
-    .chain(
-        proposed_execpolicy_amendment
-            .filter(|_| features.enabled(Feature::ExecPolicy))
-            .and_then(|prefix| {
-                let rendered_prefix = strip_bash_lc_and_escape(prefix.command());
-                if rendered_prefix.contains('\n') || rendered_prefix.contains('\r') {
-                    return None;
-                }
+    }];
 
-                Some(ApprovalOption {
-                    label: format!(
-                        "Yes, and don't ask again for commands that start with `{rendered_prefix}`"
-                    ),
-                    decision: ApprovalDecision::Review(
-                        ReviewDecision::ApprovedExecpolicyAmendment {
-                            proposed_execpolicy_amendment: prefix,
-                        },
-                    ),
-                    display_shortcut: None,
-                    additional_shortcuts: vec![key_hint::plain(KeyCode::Char('p'))],
-                })
+    if let Some(prefix) = proposed_execpolicy_amendment
+        .filter(|_| features.enabled(Feature::ExecPolicy))
+        .and_then(|prefix| {
+            let rendered_prefix = strip_bash_lc_and_escape(prefix.command());
+            if rendered_prefix.contains('\n') || rendered_prefix.contains('\r') {
+                return None;
+            }
+
+            Some((prefix, rendered_prefix))
+        })
+    {
+        let (prefix, rendered_prefix) = prefix;
+        options.push(ApprovalOption {
+            label: format!(
+                "Yes, and don't ask again for commands that start with `{rendered_prefix}`"
+            ),
+            decision: ApprovalDecision::Review(ReviewDecision::ApprovedExecpolicyAmendment {
+                proposed_execpolicy_amendment: prefix,
             }),
-    )
-    .chain([ApprovalOption {
+            display_shortcut: None,
+            additional_shortcuts: vec![key_hint::plain(KeyCode::Char('p'))],
+        });
+    }
+
+    if let Some(preset) = builtin_approval_presets()
+        .into_iter()
+        .find(|preset| preset.id == "auto")
+    {
+        options.push(ApprovalOption {
+            label: "Yes, switch approval mode to Agent".to_string(),
+            decision: ApprovalDecision::ReviewWithPreset {
+                decision: ReviewDecision::Approved,
+                preset,
+            },
+            display_shortcut: None,
+            additional_shortcuts: vec![key_hint::plain(KeyCode::Char('a'))],
+        });
+    }
+
+    if let Some(preset) = builtin_approval_presets()
+        .into_iter()
+        .find(|preset| preset.id == "full-access")
+    {
+        options.push(ApprovalOption {
+            label: "Yes, switch approval mode to Agent (full access)".to_string(),
+            decision: ApprovalDecision::ReviewWithPreset {
+                decision: ReviewDecision::Approved,
+                preset,
+            },
+            display_shortcut: None,
+            additional_shortcuts: vec![key_hint::plain(KeyCode::Char('f'))],
+        });
+    }
+
+    options.push(ApprovalOption {
         label: "No, and tell Codex what to do differently".to_string(),
         decision: ApprovalDecision::Review(ReviewDecision::Abort),
         display_shortcut: Some(key_hint::plain(KeyCode::Esc)),
         additional_shortcuts: vec![key_hint::plain(KeyCode::Char('n'))],
-    }])
-    .collect()
+    });
+
+    options
 }
 
 fn patch_options() -> Vec<ApprovalOption> {
@@ -540,6 +600,8 @@ fn elicitation_options() -> Vec<ApprovalOption> {
 mod tests {
     use super::*;
     use crate::app_event::AppEvent;
+    use codex_core::protocol::AskForApproval;
+    use codex_core::protocol::SandboxPolicy;
     use pretty_assertions::assert_eq;
     use tokio::sync::mpsc::unbounded_channel;
 
@@ -639,10 +701,63 @@ mod tests {
                 features
             },
         );
-        assert_eq!(view.options.len(), 2);
+        assert!(
+            !view.options.iter().any(|opt| matches!(
+                opt.decision,
+                ApprovalDecision::Review(ReviewDecision::ApprovedExecpolicyAmendment { .. })
+            )),
+            "execpolicy amendment option should be hidden when feature disabled"
+        );
         view.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
         assert!(!view.is_complete());
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn agent_preset_option_switches_mode_and_executes() {
+        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx);
+        let mut view = ApprovalOverlay::new(make_exec_request(), tx, Features::with_defaults());
+        view.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+
+        let mut saw_override = false;
+        let mut saw_update_approval = false;
+        let mut saw_update_sandbox = false;
+        let mut saw_exec = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AppEvent::CodexOp(Op::OverrideTurnContext {
+                    approval_policy,
+                    sandbox_policy,
+                    ..
+                }) => {
+                    assert_eq!(approval_policy, Some(AskForApproval::OnRequest));
+                    assert!(matches!(
+                        sandbox_policy,
+                        Some(SandboxPolicy::WorkspaceWrite { .. })
+                    ));
+                    saw_override = true;
+                }
+                AppEvent::UpdateAskForApprovalPolicy(policy) => {
+                    assert_eq!(policy, AskForApproval::OnRequest);
+                    saw_update_approval = true;
+                }
+                AppEvent::UpdateSandboxPolicy(policy) => {
+                    assert!(matches!(policy, SandboxPolicy::WorkspaceWrite { .. }));
+                    saw_update_sandbox = true;
+                }
+                AppEvent::CodexOp(Op::ExecApproval { decision, .. }) => {
+                    assert_eq!(decision, ReviewDecision::Approved);
+                    saw_exec = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_override && saw_update_approval && saw_update_sandbox && saw_exec,
+            "expected approval mode switch to apply and command to run"
+        );
     }
 
     #[test]
