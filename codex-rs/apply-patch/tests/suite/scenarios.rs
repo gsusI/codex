@@ -1,8 +1,8 @@
 use codex_utils_cargo_bin::find_resource;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
-use std::fs;
 use std::env;
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -60,9 +60,8 @@ fn run_apply_patch_scenario(dir: &Path) -> anyhow::Result<()> {
 
 fn scenarios_dir() -> anyhow::Result<PathBuf> {
     let candidates = [
-        codex_utils_cargo_bin::buck_project_root()?.map(|root| {
-            root.join("codex-rs/apply-patch/tests/fixtures/scenarios")
-        }),
+        codex_utils_cargo_bin::buck_project_root()?
+            .map(|root| root.join("codex-rs/apply-patch/tests/fixtures/scenarios")),
         env::var_os("TEST_SRCDIR").map(|root| {
             PathBuf::from(root).join("_main/codex-rs/apply-patch/tests/fixtures/scenarios")
         }),
