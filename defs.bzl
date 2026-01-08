@@ -67,6 +67,7 @@ def codex_rust_crate(
             compile_data = compile_data,
             srcs = lib_srcs,
             edition = crate_edition,
+            rustc_env = rustc_env,
             visibility = ["//visibility:public"],
         )
 
