@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use codex_core::features::Feature;
+use codex_utils_cargo_bin::find_resource;
 use core_test_support::load_sse_fixture_with_id;
 use core_test_support::responses;
 use core_test_support::responses::start_mock_server;
@@ -9,8 +10,11 @@ use core_test_support::test_codex::test_codex;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 
-fn sse_completed(id: &str) -> String {
-    load_sse_fixture_with_id("tests/fixtures/completed_template.json", id)
+fn sse_completed(id: &str) -> anyhow::Result<String> {
+    Ok(load_sse_fixture_with_id(
+        find_resource!("tests/fixtures/completed_template.json")?,
+        id,
+    ))
 }
 
 #[allow(clippy::expect_used)]
@@ -28,7 +32,7 @@ async fn web_search_cached_sets_external_web_access_false_in_request_body() {
     skip_if_no_network!();
 
     let server = start_mock_server().await;
-    let sse = sse_completed("resp-1");
+    let sse = sse_completed("resp-1").expect("load fixture");
     let resp_mock = responses::mount_sse_once(&server, sse).await;
 
     let mut builder = test_codex()
@@ -59,7 +63,7 @@ async fn web_search_cached_takes_precedence_over_web_search_request_in_request_b
     skip_if_no_network!();
 
     let server = start_mock_server().await;
-    let sse = sse_completed("resp-1");
+    let sse = sse_completed("resp-1").expect("load fixture");
     let resp_mock = responses::mount_sse_once(&server, sse).await;
 
     let mut builder = test_codex()
